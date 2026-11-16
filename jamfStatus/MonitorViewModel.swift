@@ -30,20 +30,33 @@ struct ParsedNotification: Identifiable {
     }
 }
 
+// MARK: - InstanceStatus
+
+/// Latest polled state for a single Jamf Pro instance.
+struct InstanceStatus {
+    var connection: MonitorViewModel.ConnectionStatus = .unknown
+    var authMessage: String = ""
+    var notifications: [ParsedNotification] = []
+    var healthStatus: HealthStatus?
+}
+
 // MARK: - MonitorViewModel
 
 @MainActor
 final class MonitorViewModel: ObservableObject {
 
     @Published var menuBarIconName: String = "cloudStatus-green"
-    @Published var notifications: [ParsedNotification] = []
-    @Published var connectionStatus: ConnectionStatus = .unknown
+    @Published private(set) var instances: [JamfInstance] = []
+    @Published private(set) var statuses: [UUID: InstanceStatus] = [:]
 
     enum ConnectionStatus { case unknown, connected, failed }
 
     private var prevState: String = "cloudStatus-green"
     private var monitorTask: Task<Void, Never>?
     private var alertPanel: StatusAlertPanel?
+
+    /// Credentials for each instance, loaded from the keychain once and kept in memory.
+    private var credentials: [UUID: (username: String, password: String)] = [:]
 
     private let fm = FileManager.default
     private let launchAgentPath = NSHomeDirectory() + "/Library/LaunchAgents/com.jamf.cloudmonitor.plist"
@@ -62,24 +75,6 @@ final class MonitorViewModel: ObservableObject {
             UserDefaults.standard.set(false, forKey: "launchAgent")
         }
 
-        // Sync useApiClient global from UserDefaults so TokenManager/Credentials use the right mode
-        useApiClient = UserDefaults.standard.integer(forKey: "useApiClient")
-
-        let serverUrl = (UserDefaults.standard.string(forKey: "jamfServerUrl") ?? "").baseUrl
-        if !serverUrl.isEmpty {
-            JamfProServer.url = serverUrl
-            let creds = Credentials().itemLookup(service: serverUrl.fqdn)
-            if creds.count == 2 {
-                JamfProServer.username = creds[0]
-                JamfProServer.password = creds[1]
-                writeToLog.message(stringOfText: ["[Auth] Credentials loaded from keychain for \(serverUrl.fqdn), auth mode: \(useApiClient == 0 ? "username/password" : "API client")"])
-            } else {
-                writeToLog.message(stringOfText: ["[Auth] No credentials found in keychain for \(serverUrl.isEmpty ? "(no server)" : serverUrl.fqdn)"])
-            }
-        } else {
-            writeToLog.message(stringOfText: ["[Auth] No server URL configured"])
-        }
-
         let os = ProcessInfo().operatingSystemVersion
         writeToLog.message(stringOfText: [""])
         writeToLog.message(stringOfText: ["================================================================"])
@@ -87,7 +82,25 @@ final class MonitorViewModel: ObservableObject {
         writeToLog.message(stringOfText: ["         macOS Version: \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"])
         writeToLog.message(stringOfText: ["================================================================"])
 
+        instances = JamfInstanceStore.load()
+        if instances.isEmpty {
+            writeToLog.message(stringOfText: ["[Auth] No Jamf Pro instances configured"])
+        }
+        for instance in instances {
+            loadCredentials(for: instance)
+        }
+
         startMonitoring()
+    }
+
+    // MARK: - Instance state
+
+    func status(for instanceId: UUID) -> InstanceStatus {
+        statuses[instanceId] ?? InstanceStatus()
+    }
+
+    var totalNotificationCount: Int {
+        instances.reduce(0) { $0 + status(for: $1.id).notifications.count }
     }
 
     // MARK: - Monitor loop
@@ -106,25 +119,58 @@ final class MonitorViewModel: ObservableObject {
     }
 
     private func tick() async {
-        Logger.check.info("checking server: \(JamfProServer.url, privacy: .public)")
-        await refreshNotifications()
+        // Poll every instance concurrently; network waits don't block the main actor.
+        await withTaskGroup(of: Void.self) { group in
+            for instance in instances {
+                group.addTask { await self.refresh(instance) }
+            }
+        }
         let iconResult = (try? await getCloudStatus()) ?? "cloudStatus-green"
-        try? await refreshHealthStatus()
         updateMenuBarIcon(for: iconResult)
-        let authOk = TokenManager.shared.tokenInfo?.authMessage == "success"
-        connectionStatus = authOk ? .connected : .failed
+    }
+
+    private func refresh(_ instance: JamfInstance) async {
+        Logger.check.info("checking server: \(instance.url, privacy: .public)")
+
+        guard let creds = credentials[instance.id] else {
+            setStatus(InstanceStatus(connection: .failed, authMessage: "No credentials saved"), for: instance.id)
+            return
+        }
+
+        let token = await TokenManager.shared.validToken(
+            for: instance,
+            username: creds.username.lowercased(),
+            password: creds.password
+        )
+        guard token.authMessage == "success" else {
+            setStatus(InstanceStatus(connection: .failed, authMessage: token.authMessage), for: instance.id)
+            return
+        }
+
+        var newStatus = InstanceStatus(connection: .connected, authMessage: "success")
+        newStatus.notifications = await fetchNotifications(instance, token: token.token)
+        newStatus.healthStatus  = await fetchHealthStatus(instance, token: token.token)
+        setStatus(newStatus, for: instance.id)
+    }
+
+    private func setStatus(_ status: InstanceStatus, for instanceId: UUID) {
+        // Ignore results for an instance that was removed while it was being polled
+        guard instances.contains(where: { $0.id == instanceId }) else { return }
+        statuses[instanceId] = status
     }
 
     // MARK: - Notifications
 
-    private func refreshNotifications() async {
-        await withCheckedContinuation { continuation in
-            UapiCall().get(endpoint: "v1/notifications") { [weak self] alerts in
-                guard let self else { continuation.resume(); return }
-                self.notifications = alerts.compactMap { ParsedNotification(raw: $0) }
-                continuation.resume()
-            }
+    private func fetchNotifications(_ instance: JamfInstance, token: String) async -> [ParsedNotification] {
+        do {
+            let alerts = try await UapiCall().get(serverUrl: instance.url, token: token, endpoint: "v1/notifications")
+            return alerts.compactMap { ParsedNotification(raw: $0) }
+        } catch UapiError.unauthorized {
+            await TokenManager.shared.invalidate(instance.id)
+        } catch {
+            Logger.jpapi.info("[\(instance.displayName, privacy: .public)] notifications request failed: \(error.localizedDescription, privacy: .public)")
         }
+        return []
     }
 
     // MARK: - Cloud status
@@ -138,7 +184,8 @@ final class MonitorViewModel: ObservableObject {
             }
             data = fileData
         } else {
-            guard TokenManager.shared.tokenInfo?.authMessage == "success" else {
+            // Only check Jamf Cloud status once at least one instance is reachable
+            guard statuses.values.contains(where: { $0.connection == .connected }) else {
                 return "cloudStatus-green"
             }
 
@@ -149,7 +196,6 @@ final class MonitorViewModel: ObservableObject {
             request.httpMethod = "GET"
             let config = URLSessionConfiguration.default
             config.httpAdditionalHeaders = [
-                "Authorization": "Bearer \(JamfProServer.accessToken)",
                 "Accept": "application/json",
                 "User-Agent": AppInfo.userAgentHeader
             ]
@@ -230,30 +276,36 @@ final class MonitorViewModel: ObservableObject {
 
     // MARK: - Health status
 
-    private func refreshHealthStatus() async throws {
-        guard TokenManager.shared.tokenInfo?.authMessage == "success",
-              !JamfProServer.url.isEmpty,
-              let url = URL(string: "\(JamfProServer.url)/api/v1/health-status") else { return }
+    private func fetchHealthStatus(_ instance: JamfInstance, token: String) async -> HealthStatus? {
+        guard let url = URL(string: "\(instance.url)/api/v1/health-status") else { return nil }
 
         var request = URLRequest(url: url)
         request.httpMethod  = "GET"
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Bearer \(JamfProServer.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(AppInfo.userAgentHeader, forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw HealthStatusError.invalidResponse
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw HealthStatusError.invalidResponse }
+            if http.statusCode == 401 {
+                await TokenManager.shared.invalidate(instance.id)
+                throw HealthStatusError.authenticationFailed
+            }
+            guard (200..<300).contains(http.statusCode) else { throw HealthStatusError.invalidResponse }
+
+            let decoded = try JSONDecoder().decode(HealthStatus.self, from: data)
+            Logger.check.info("[\(instance.displayName, privacy: .public)] health status updated")
+            logHealthRateWarnings(decoded, instance: instance)
+            return decoded
+        } catch {
+            Logger.check.info("[\(instance.displayName, privacy: .public)] health status request failed: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
-        let decoded = try JSONDecoder().decode(HealthStatus.self, from: data)
-        HealthStatusStore.shared.update(from: decoded)
-        NotificationCenter.default.post(name: .updateHealthStatusView, object: nil)
-        Logger.check.info("health status updated")
-        logHealthRateWarnings(decoded)
     }
 
-    private func logHealthRateWarnings(_ hs: HealthStatus) {
+    private func logHealthRateWarnings(_ hs: HealthStatus, instance: JamfInstance) {
         for (label, api) in [("API", hs.api), ("UI", hs.ui), ("Enrollment", hs.enrollment),
                               ("Device", hs.device), ("Default", hs.healthStatusDefault)] {
             let mirror = Mirror(reflecting: api)
@@ -262,55 +314,89 @@ final class MonitorViewModel: ObservableObject {
                 return "    \(name): \(rate)"
             }
             if !low.isEmpty {
-                writeToLog.message(stringOfText: ["\(label) rate warning:"] + low)
+                writeToLog.message(stringOfText: ["[\(instance.displayName)] \(label) rate warning:"] + low)
             }
         }
     }
 
-    // MARK: - Credential management
+    // MARK: - Instance management
 
-    func loadCredentials() {
-        let serverUrl = (UserDefaults.standard.string(forKey: "jamfServerUrl") ?? "").baseUrl
-        guard !serverUrl.isEmpty else { return }
-        JamfProServer.url = serverUrl
-        let creds = Credentials().itemLookup(service: serverUrl.fqdn)
+    private func loadCredentials(for instance: JamfInstance) {
+        let creds = Credentials().itemLookup(service: instance.url.fqdn, useApiClient: instance.useApiClient)
         if creds.count == 2 {
-            JamfProServer.username = creds[0]
-            JamfProServer.password = creds[1]
+            credentials[instance.id] = (creds[0], creds[1])
+            writeToLog.message(stringOfText: ["[Auth] Credentials loaded from keychain for \(instance.url.fqdn), auth mode: \(instance.useApiClient ? "API client" : "username/password")"])
         } else {
-            JamfProServer.username = ""
-            JamfProServer.password = ""
+            credentials[instance.id] = nil
+            writeToLog.message(stringOfText: ["[Auth] No credentials found in keychain for \(instance.url.fqdn)"])
         }
     }
 
-    func saveCredentials(server: String, username: String, password: String) {
-        guard !server.isEmpty, !username.isEmpty, !password.isEmpty else { return }
-        // Keep global in sync with the setting the user just saved
-        useApiClient = UserDefaults.standard.integer(forKey: "useApiClient")
-        JamfProServer.url      = server
-        JamfProServer.username = username
-        JamfProServer.password = password
-        JamfProServer.base64Creds = (
-            "\(username):\(password)".data(using: .utf8)?.base64EncodedString()
-        ) ?? ""
-        JamfProServer.validToken = false
-        connectionStatus = .unknown
+    /// Credentials currently in use for a configured instance.
+    func savedCredentials(for instanceId: UUID) -> (username: String, password: String)? {
+        credentials[instanceId]
+    }
 
-        Task {
-            await TokenManager.shared.setToken(
-                serverUrl: server,
-                username: username.lowercased(),
-                password: password
-            )
-            let authMessage = TokenManager.shared.tokenInfo?.authMessage ?? ""
-            if authMessage == "success" {
-                UserDefaults.standard.set(server, forKey: "jamfServerUrl")
-                Credentials().save(service: server.fqdn, account: username, data: password)
-                connectionStatus = .connected
-                writeToLog.message(stringOfText: ["[Auth] Settings saved — token granted for \(server)"])
-            } else {
-                connectionStatus = .failed
-            }
+    /// Credentials stored in the keychain for a server and auth type, used to prefill Settings.
+    func storedCredentials(url: String, useApiClient: Bool) -> (username: String, password: String)? {
+        guard !url.isEmpty else { return nil }
+        let creds = Credentials().itemLookup(service: url.fqdn, useApiClient: useApiClient)
+        return creds.count == 2 ? (creds[0], creds[1]) : nil
+    }
+
+    /// Verifies the credentials by requesting a token, then adds or updates the instance.
+    /// Returns nil on success, otherwise a message describing the failure.
+    func saveInstance(_ instance: JamfInstance, username: String, password: String) async -> String? {
+        guard !instance.url.isEmpty, !username.isEmpty, !password.isEmpty else {
+            return "Server URL, username, and password are required."
+        }
+        if instances.contains(where: { $0.id != instance.id && $0.url.fqdn == instance.url.fqdn && $0.useApiClient == instance.useApiClient }) {
+            return "\(instance.url.fqdn) is already configured with this authentication type."
+        }
+
+        let token = await TokenManager.shared.requestToken(for: instance, username: username.lowercased(), password: password)
+        guard token.authMessage == "success" else {
+            await TokenManager.shared.invalidate(instance.id)
+            return token.authMessage
+        }
+
+        let previous = instances.first(where: { $0.id == instance.id })
+        if let index = instances.firstIndex(where: { $0.id == instance.id }) {
+            instances[index] = instance
+        } else {
+            instances.append(instance)
+        }
+        JamfInstanceStore.save(instances)
+
+        Credentials().save(service: instance.url.fqdn, account: username, data: password, useApiClient: instance.useApiClient)
+        credentials[instance.id] = (username, password)
+        if let previous, previous.url.fqdn != instance.url.fqdn || previous.useApiClient != instance.useApiClient {
+            deleteCredentialsIfUnused(previous)
+        }
+
+        statuses[instance.id] = InstanceStatus(connection: .connected, authMessage: "success")
+        writeToLog.message(stringOfText: ["[Auth] Settings saved — token granted for \(instance.url)"])
+
+        Task { await refresh(instance) }
+        return nil
+    }
+
+    func removeInstance(id: UUID) {
+        guard let index = instances.firstIndex(where: { $0.id == id }) else { return }
+        let removed = instances.remove(at: index)
+        JamfInstanceStore.save(instances)
+        statuses[id] = nil
+        credentials[id] = nil
+        deleteCredentialsIfUnused(removed)
+        Task { await TokenManager.shared.invalidate(id) }
+        writeToLog.message(stringOfText: ["[Settings] Removed instance \(removed.url)"])
+    }
+
+    /// Keychain entries are keyed by server and auth type, so only delete when no other instance shares them.
+    private func deleteCredentialsIfUnused(_ instance: JamfInstance) {
+        let stillUsed = instances.contains { $0.url.fqdn == instance.url.fqdn && $0.useApiClient == instance.useApiClient }
+        if !stillUsed {
+            Credentials().delete(service: instance.url.fqdn, useApiClient: instance.useApiClient)
         }
     }
 

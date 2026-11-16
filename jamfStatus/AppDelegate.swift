@@ -29,6 +29,7 @@ struct JamfStatusApp: App {
 
         Window("Health Status", id: "health-status") {
             HealthStatusView()
+                .environmentObject(monitor)
         }
         .defaultSize(width: 560, height: 220)
         .windowResizability(.contentSize)

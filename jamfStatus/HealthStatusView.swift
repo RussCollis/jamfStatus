@@ -1,13 +1,41 @@
 import SwiftUI
 
 struct HealthStatusView: View {
-    @ObservedObject private var store = HealthStatusStore.shared
+    @EnvironmentObject var monitor: MonitorViewModel
+    @AppStorage("healthStatusInstance") private var selectedInstanceIdString: String = ""
 
     private let timeLabels = ["30s", "1m", "5m", "15m", "30m"]
 
+    /// The chosen instance, defaulting to the first configured one.
+    private var selectedInstance: JamfInstance? {
+        monitor.instances.first { $0.id.uuidString == selectedInstanceIdString } ?? monitor.instances.first
+    }
+
     var body: some View {
+        VStack(spacing: 0) {
+            if monitor.instances.count > 1 {
+                Picker("Instance:", selection: Binding(
+                    get: { selectedInstance?.id },
+                    set: { selectedInstanceIdString = $0?.uuidString ?? "" }
+                )) {
+                    ForEach(monitor.instances) { instance in
+                        Text(instance.displayName).tag(Optional(instance.id))
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: 300)
+                .padding([.top, .horizontal])
+            }
+            healthContent
+        }
+        .frame(minWidth: 480)
+        .onAppear { NSApp.activate(ignoringOtherApps: true) }
+    }
+
+    @ViewBuilder
+    private var healthContent: some View {
         Group {
-            if let hs = store.healthStatus {
+            if let instance = selectedInstance, let hs = monitor.status(for: instance.id).healthStatus {
                 VStack(spacing: 0) {
                     Text("Request Acceptance Percent")
                         .font(.headline)
@@ -22,13 +50,12 @@ struct HealthStatusView: View {
                 }
                 .padding()
             } else {
-                Text("No health status data yet.")
+                Text(monitor.instances.isEmpty ? "No Jamf Pro instances configured." : "No health status data yet.")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
             }
         }
-        .frame(minWidth: 480)
-        .onAppear { NSApp.activate(ignoringOtherApps: true) }
     }
 
     private var headerRow: some View {

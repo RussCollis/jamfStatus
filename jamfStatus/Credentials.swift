@@ -12,9 +12,13 @@ let keychainQ                      = DispatchQueue(label: "com.jamfie.jamfstatus
 
 class Credentials {
     
-    func save(service: String, account: String, data: String) {
+    private func keychainService(_ service: String, useApiClient: Bool) -> String {
+        return useApiClient ? "jamfStatus-apiClient: \(service)" : "jamfStatus: \(service)"
+    }
+
+    func save(service: String, account: String, data: String, useApiClient: Bool) {
         
-        let theService = (useApiClient == 0) ? "jamfStatus: \(service)":"jamfStatus-apiClient: \(service)"
+        let theService = keychainService(service, useApiClient: useApiClient)
         
         keychainQ.async { [self] in
             if let password = data.data(using: String.Encoding.utf8) {
@@ -24,7 +28,7 @@ class Credentials {
                                                     kSecValueData as String: password]
                 
                 // see if credentials already exist for server
-                let accountCheck = itemLookup(service: service)
+                let accountCheck = itemLookup(service: service, useApiClient: useApiClient)
                 if accountCheck.count == 0 {
                     // try to add new credentials, if account exists we'll try updating it
                     let addStatus = SecItemAdd(keychainQuery as CFDictionary, nil)
@@ -59,25 +63,25 @@ class Credentials {
         }
     }   // func save - end
     
-    func itemLookup(service: String) -> [String] {
-        var existingCredientials = retrieve(service: service)
+    func itemLookup(service: String, useApiClient: Bool) -> [String] {
+        var existingCredientials = retrieve(service: service, useApiClient: useApiClient)
         if existingCredientials.count == 0 {
-            existingCredientials = retrieve(service: "\(service)/")
+            existingCredientials = retrieve(service: "\(service)/", useApiClient: useApiClient)
             if existingCredientials.count == 0 {
-                existingCredientials = retrieve(service: "\(service):8443")
+                existingCredientials = retrieve(service: "\(service):8443", useApiClient: useApiClient)
                 if existingCredientials.count == 0 {
-                    existingCredientials = retrieve(service: "\(service):8443/")
+                    existingCredientials = retrieve(service: "\(service):8443/", useApiClient: useApiClient)
                 }
             }
         }
         return existingCredientials
     }
     
-    func retrieve(service: String) -> [String] {
+    func retrieve(service: String, useApiClient: Bool) -> [String] {
         
         var storedCreds = [String]()
         
-        let theService = (useApiClient == 0) ? "jamfStatus: \(service)":"jamfStatus-apiClient: \(service)"
+        let theService = keychainService(service, useApiClient: useApiClient)
         
         let keychainQuery: [String: Any] = [kSecClass as String: kSecClassGenericPasswordString,
                                             kSecAttrService as String: theService,
@@ -101,5 +105,18 @@ class Credentials {
         storedCreds.append(password)
         return storedCreds
     }
-    
+
+    func delete(service: String, useApiClient: Bool) {
+        let theService = keychainService(service, useApiClient: useApiClient)
+        keychainQ.async {
+            let keychainQuery: [String: Any] = [kSecClass as String: kSecClassGenericPasswordString,
+                                                kSecAttrService as String: theService]
+            let status = SecItemDelete(keychainQuery as CFDictionary)
+            if status != errSecSuccess && status != errSecItemNotFound {
+                if let deleteErr = SecCopyErrorMessageString(status, nil) {
+                    print("[Credentials.delete] Delete failed: \(deleteErr)")
+                }
+            }
+        }
+    }
 }

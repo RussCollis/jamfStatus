@@ -7,7 +7,6 @@ import Foundation
 
 let httpSuccess     = 200...299
 let refreshInterval: UInt32 = 20*60 // 20 minutes
-var useApiClient    = 0
 let defaults        = UserDefaults.standard
 
 struct AppInfo {
@@ -146,25 +145,6 @@ struct JamfNotification {
                       "PUSH_PROXY_CERT_EXPIRED":"Push Proxy",
                       "PUSH_CERT_WILL_EXPIRE":"Push Notification",
                       "PUSH_CERT_EXPIRED":"Push Notification"]
-}
-
-struct JamfProServer {
-    static var accessToken  = ""
-    static var authCreds    = ""
-    static var authExpires  = 30.0
-    static var base64Creds  = ""
-    static var build        = ""
-    static var currentCred  = ""
-    static let maxThreads   = 2
-    static var majorVersion = 0
-    static var minorVersion = 0
-    static var password     = ""
-    static var patchVersion = 0
-    static var tokenCreated = Date()
-    static var url          = ""
-    static var username     = ""
-    static var validToken   = false
-    static var version      = ""
 }
 
 struct Log {

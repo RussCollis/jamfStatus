@@ -57,18 +57,48 @@ struct MenuBarView: View {
             openWindow(id: "health-status")
         }
 
-        if !monitor.notifications.isEmpty {
-            Menu("Notifications (\(monitor.notifications.count))") {
-                ForEach(monitor.notifications) { note in
-                    Text(note.displayTitle)
+        // Connection status light for each Jamf Pro instance; selecting one opens it in the browser.
+        // Emoji are used because menu bar menus don't reliably render custom image icons.
+        ForEach(monitor.instances) { instance in
+            let connected = monitor.status(for: instance.id).connection == .connected
+            Button("\(connected ? "🟢" : "🔴") \(instance.displayName)") {
+                if let url = URL(string: instance.url) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .help(instance.url)
+        }
+
+        if monitor.totalNotificationCount > 0 {
+            Menu("Notifications (\(monitor.totalNotificationCount))") {
+                if monitor.instances.count == 1, let instance = monitor.instances.first {
+                    notificationItems(for: instance)
+                } else {
+                    // Group notifications by instance when monitoring more than one server
+                    ForEach(monitor.instances) { instance in
+                        let count = monitor.status(for: instance.id).notifications.count
+                        if count > 0 {
+                            Menu("\(instance.displayName) (\(count))") {
+                                notificationItems(for: instance)
+                            }
+                        }
+                    }
                 }
             }
         }
+
 
         Divider()
 
         Button("Quit") {
             NSApplication.shared.terminate(nil)
+        }
+    }
+
+    @ViewBuilder
+    private func notificationItems(for instance: JamfInstance) -> some View {
+        ForEach(monitor.status(for: instance.id).notifications) { note in
+            Text(note.displayTitle)
         }
     }
 

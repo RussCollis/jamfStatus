@@ -8,32 +8,48 @@ import OSLog
 actor TokenManager {
     static let shared = TokenManager()
     
-    @MainActor private(set) var tokenInfo: TokenInfo?
+    /// Most recent token for each Jamf Pro instance, keyed by instance id.
+    private var tokens: [UUID: TokenInfo] = [:]
     
-    func getToken() async -> TokenInfo? {
-        await MainActor.run { tokenInfo }
+    /// Returns a usable token for the instance, requesting a new one if none is cached
+    /// or the cached token is about to expire.
+    func validToken(for instance: JamfInstance, username: String, password: String) async -> TokenInfo {
+        if let cached = tokens[instance.id], cached.authMessage == "success", !cached.renewToken {
+            return cached
+        }
+        return await requestToken(for: instance, username: username, password: password)
+    }
+    
+    /// Discards the cached token, e.g. after a 401 or when the instance's settings change.
+    func invalidate(_ instanceId: UUID) {
+        tokens[instanceId] = nil
     }
 
-    func setToken(serverUrl: String, username: String, password: String) async {
+    @discardableResult
+    func requestToken(for instance: JamfInstance, username: String, password: String) async -> TokenInfo {
+        let tokenInfo = await fetchToken(serverUrl: instance.url, useApiClient: instance.useApiClient, username: username, password: password)
+        tokenInfo.id = instance.id
+        tokens[instance.id] = tokenInfo
+        return tokenInfo
+    }
+
+    private func fetchToken(serverUrl: String, useApiClient: Bool, username: String, password: String) async -> TokenInfo {
         
-        let newTokenInfo: TokenInfo
+let newTokenInfo: TokenInfo
         
-        let tokenUrlString = (useApiClient == 0) ? "\(serverUrl)/api/v1/auth/token" : "\(serverUrl)/api/oauth/token"
+        let tokenUrlString = !useApiClient ? "\(serverUrl)/api/v1/auth/token" : "\(serverUrl)/api/oauth/token"
         Logger.check.debug("request token from: \(tokenUrlString, privacy: .public)")
         
         guard let tokenUrl = URL(string: tokenUrlString) else {
             writeToLog.message(stringOfText: ["[Auth] Invalid token URL: \(tokenUrlString)"])
             newTokenInfo = TokenInfo(url: serverUrl, token: "", expiresAt: Date(), authMessage: "Invalid URL: \(tokenUrlString)")
-            await MainActor.run {
-                self.tokenInfo = newTokenInfo
-            }
-            return
+            return newTokenInfo
         }
 
         var request = URLRequest(url: tokenUrl)
         request.httpMethod = "POST"
 
-        if useApiClient == 0 {
+        if !useApiClient {
             let base64creds = Data("\(username):\(password)".utf8).base64EncodedString()
             request.setValue("Basic \(base64creds)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -64,10 +80,7 @@ actor TokenManager {
                 Logger.check.debug("failed to get token: \(authMessage, privacy: .public)")
                 writeToLog.message(stringOfText: ["[Auth] Token request failed for \(serverUrl): \(authMessage)"])
                 newTokenInfo = TokenInfo(url: serverUrl, token: "", expiresAt: Date(), authMessage: authMessage)
-                await MainActor.run {
-                    self.tokenInfo = newTokenInfo
-                }
-                return
+                return newTokenInfo
             }
 
             let decoder = JSONDecoder()
@@ -100,21 +113,13 @@ actor TokenManager {
                 )
             }
 
-            JamfProServer.accessToken = newTokenInfo.token
-            JamfProServer.validToken = true
-            Logger.check.debug("granted new token, expires \(newTokenInfo.expiresAt, privacy: .public)")
-            
-            await MainActor.run {
-                self.tokenInfo = newTokenInfo
-            }
+            Logger.check.debug("granted new token for \(serverUrl, privacy: .public), expires \(newTokenInfo.expiresAt, privacy: .public)")
+            return newTokenInfo
 
         } catch {
             Logger.check.debug("Token request failed: \(error.localizedDescription, privacy: .public)")
             writeToLog.message(stringOfText: ["[Auth] Token request error for \(serverUrl): \(error.localizedDescription)"])
-            newTokenInfo = TokenInfo(url: serverUrl, token: "", expiresAt: Date(), authMessage: error.localizedDescription)
-            await MainActor.run {
-                self.tokenInfo = newTokenInfo
-            }
+            return TokenInfo(url: serverUrl, token: "", expiresAt: Date(), authMessage: error.localizedDescription)
         }
     }
 }

@@ -9,80 +9,56 @@
 import Foundation
 import OSLog
 
-class UapiCall: NSObject, URLSessionDelegate, URLSessionDataDelegate, URLSessionTaskDelegate {
+enum UapiError: Error {
+    case unauthorized
+    case requestFailed
+}
+
+class UapiCall: NSObject, URLSessionDelegate {
     
-    var theUapiQ = OperationQueue() // create operation queue for API calls
-    
-    func get(endpoint: String, completion: @escaping (_ notificationAlerts: [Dictionary<String,Any>]) -> Void) {
-                
-        Task {
-            if await TokenManager.shared.tokenInfo?.renewToken ?? true || !JamfProServer.validToken {
-                await TokenManager.shared.setToken(serverUrl: JamfProServer.url, username: JamfProServer.username.lowercased(), password: JamfProServer.password)
-            }
-            
-            if await TokenManager.shared.tokenInfo?.authMessage ?? "" == "success" {
-                
-            URLCache.shared.removeAllCachedResponses()
-            
-            var workingUrlString = "\(JamfProServer.url)/api/\(endpoint)"
-            workingUrlString     = workingUrlString.replacingOccurrences(of: "//api", with: "/api")
-            
-            self.theUapiQ.maxConcurrentOperationCount = 1
-            
-                self.theUapiQ.addOperation {
-                    URLCache.shared.removeAllCachedResponses()
-                    
-                    let encodedURL = NSURL(string: workingUrlString)
-                    let request = NSMutableURLRequest(url: encodedURL! as URL)
-                    
-                    let configuration  = URLSessionConfiguration.default
-                    request.httpMethod = "GET"
-                    
-                    configuration.httpAdditionalHeaders = ["Authorization" : "Bearer \(JamfProServer.accessToken)", "Content-Type" : "application/json", "Accept" : "application/json", "User-Agent" : AppInfo.userAgentHeader]
-                    
-                    let session = Foundation.URLSession(configuration: configuration, delegate: self as URLSessionDelegate, delegateQueue: OperationQueue.main)
-                    
-                    let task = session.dataTask(with: request as URLRequest, completionHandler: {
-                        (data, response, error) -> Void in
-                        if let httpResponse = response as? HTTPURLResponse {
-                            if httpResponse.statusCode >= 200 && httpResponse.statusCode <= 299 {
-                                do {
-                                    let json = try JSONSerialization.jsonObject(with: data!, options: .allowFragments)
-                                    if let notificationsDictArray = json as? [[String: Any]] {
-                                        completion(notificationsDictArray)
-                                        return
-                                    } else {
-                                        Logger.jpapi.info("An error creating notifications array")
-                                        let dataString = String(data: data!, encoding: .utf8) ?? "No data"
-                                        Logger.jpapi.info("returned data: \(dataString, privacy: .public)")
-                                        completion([])
-                                        return
-                                    }
-                                } catch {
-                                    Logger.jpapi.info("An error parsing notification data occurred: \(error.localizedDescription, privacy: .public)")
-                                }
-                            } else {    // if httpResponse.statusCode <200 or >299
-                                Logger.jpapi.debug("\(endpoint, privacy: .public) - get response error: \(httpResponse.statusCode, privacy: .public)")
-                                if httpResponse.statusCode == 401 {
-                                    JamfProServer.accessToken = ""
-                                    JamfProServer.validToken = false
-                                }
-                                completion([])
-                                return
-                            }
-                        } else {
-                            Logger.jpapi.info("An error occurred: \(error!.localizedDescription, privacy: .public)")
-                        }
-                    })
-                    task.resume()
-                }
-            }
+    /// Fetches a Jamf Pro API endpoint that returns an array of objects (e.g. v1/notifications).
+    /// Throws `UapiError.unauthorized` on a 401 so the caller can discard the token.
+    func get(serverUrl: String, token: String, endpoint: String) async throws -> [[String: Any]] {
+        
+        var workingUrlString = "\(serverUrl)/api/\(endpoint)"
+        workingUrlString     = workingUrlString.replacingOccurrences(of: "//api", with: "/api")
+        guard let url = URL(string: workingUrlString) else { throw UapiError.requestFailed }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod  = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        
+        let configuration = URLSessionConfiguration.default
+        configuration.httpAdditionalHeaders = ["Authorization" : "Bearer \(token)", "Content-Type" : "application/json", "Accept" : "application/json", "User-Agent" : AppInfo.userAgentHeader]
+        
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else { throw UapiError.requestFailed }
+        
+        guard httpResponse.statusCode >= 200 && httpResponse.statusCode <= 299 else {
+            Logger.jpapi.debug("\(endpoint, privacy: .public) - get response error: \(httpResponse.statusCode, privacy: .public)")
+            if httpResponse.statusCode == 401 { throw UapiError.unauthorized }
+            throw UapiError.requestFailed
         }
+        
+        let json = try JSONSerialization.jsonObject(with: data, options: .allowFragments)
+        guard let notificationsDictArray = json as? [[String: Any]] else {
+            Logger.jpapi.info("An error creating notifications array")
+            let dataString = String(data: data, encoding: .utf8) ?? "No data"
+            Logger.jpapi.info("returned data: \(dataString, privacy: .public)")
+            return []
+        }
+        return notificationsDictArray
     }   // func get - end
     
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping(  URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        completionHandler(.useCredential, URLCredential(trust: challenge.protectionSpace.serverTrust!))
+        guard let serverTrust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
     
 }
-
