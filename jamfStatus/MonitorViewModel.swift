@@ -55,6 +55,22 @@ final class MonitorViewModel: ObservableObject {
     private var monitorTask: Task<Void, Never>?
     private var alertPanel: StatusAlertPanel?
 
+    // Instance notification popup: repeats every 15 minutes until acknowledged or snoozed.
+    private let instanceAlertRepeatInterval: TimeInterval = 15 * 60
+    private let instanceAlertSnoozeInterval: TimeInterval = 60 * 60
+    private var instanceAlertTask: Task<Void, Never>?
+    private var instanceAlertPanel: InstanceAlertPanel?
+    private var instanceAlertLastShown: Date?
+    private var instanceAlertShownSignatures: Set<String> = []
+    private var instanceAlertSnoozedUntil: [UUID: Date] = [:]
+    /// Instances shown when the popup was opened from the menu; nil for the automatic popup.
+    private var instanceAlertManualIds: [UUID]?
+    /// Notifications the user has acknowledged, persisted so they stay quiet across relaunches.
+    @Published private(set) var acknowledgedAlerts: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "acknowledgedNotifications") ?? [])
+
+    /// Latest Jamf Cloud status icon, combined with instance alerts to pick the menu bar icon.
+    private var cloudIconState: String = "cloudStatus-green"
+
     /// Credentials for each instance, loaded from the keychain once and kept in memory.
     private var credentials: [UUID: (username: String, password: String)] = [:]
 
@@ -99,10 +115,6 @@ final class MonitorViewModel: ObservableObject {
         statuses[instanceId] ?? InstanceStatus()
     }
 
-    var totalNotificationCount: Int {
-        instances.reduce(0) { $0 + status(for: $1.id).notifications.count }
-    }
-
     // MARK: - Monitor loop
 
     func startMonitoring() {
@@ -116,6 +128,16 @@ final class MonitorViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(interval) * 1_000_000_000)
             }
         }
+
+        // Check every minute whether the instance notification popup is due,
+        // independent of the (possibly longer) polling interval.
+        instanceAlertTask?.cancel()
+        instanceAlertTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+                self?.checkInstanceAlerts()
+            }
+        }
     }
 
     private func tick() async {
@@ -125,8 +147,9 @@ final class MonitorViewModel: ObservableObject {
                 group.addTask { await self.refresh(instance) }
             }
         }
-        let iconResult = (try? await getCloudStatus()) ?? "cloudStatus-green"
-        updateMenuBarIcon(for: iconResult)
+        cloudIconState = (try? await getCloudStatus()) ?? "cloudStatus-green"
+        updateMenuBarIcon()
+        checkInstanceAlerts()
     }
 
     private func refresh(_ instance: JamfInstance) async {
@@ -155,9 +178,39 @@ final class MonitorViewModel: ObservableObject {
 
     private func setStatus(_ status: InstanceStatus, for instanceId: UUID) {
         // Ignore results for an instance that was removed while it was being polled
-        guard instances.contains(where: { $0.id == instanceId }) else { return }
+        guard let instance = instances.first(where: { $0.id == instanceId }) else { return }
+        var status = status
+        #if DEBUG
+        status.notifications += demoNotifications(for: instance)
+        #endif
         statuses[instanceId] = status
+
+        // Forget acknowledgements for notifications that have cleared, so they alert again if
+        // they come back. Only prune when connected; a failed poll returns no notifications.
+        if status.connection == .connected {
+            let current = Set(status.notifications.map { alertSignature($0, instance: instance) })
+            let prefix = instance.id.uuidString + "|"
+            let stale = acknowledgedAlerts.filter { $0.hasPrefix(prefix) && !current.contains($0) }
+            if !stale.isEmpty {
+                acknowledgedAlerts.subtract(stale)
+                saveAcknowledgedAlerts()
+            }
+        }
+        updateMenuBarIcon()
     }
+
+    #if DEBUG
+    /// Debug builds only: adds a sample error notification to any instance whose name contains
+    /// "dev" so the per-instance notifications menu can be demonstrated. Uses the same raw
+    /// format as /api/v1/notifications so it goes through the normal parsing.
+    private func demoNotifications(for instance: JamfInstance) -> [ParsedNotification] {
+        guard instance.displayName.localizedCaseInsensitiveContains("dev") else { return [] }
+        let raw: [[String: Any]] = [
+            ["type": "APNS_CONNECTION_FAILURE", "params": [:]]
+        ]
+        return raw.compactMap { ParsedNotification(raw: $0) }
+    }
+    #endif
 
     // MARK: - Notifications
 
@@ -265,7 +318,163 @@ final class MonitorViewModel: ObservableObject {
         prevState = state
     }
 
-    private func updateMenuBarIcon(for result: String) {
+    // MARK: - Instance notification popup
+
+    private func alertSignature(_ note: ParsedNotification, instance: JamfInstance) -> String {
+        "\(instance.id.uuidString)|\(note.key)|\(note.displayTitle)"
+    }
+
+    private func saveAcknowledgedAlerts() {
+        UserDefaults.standard.set(Array(acknowledgedAlerts), forKey: "acknowledgedNotifications")
+        updateMenuBarIcon()
+    }
+
+    func isAcknowledged(_ note: ParsedNotification, instance: JamfInstance) -> Bool {
+        acknowledgedAlerts.contains(alertSignature(note, instance: instance))
+    }
+
+    /// True when the instance has notifications the user hasn't acknowledged yet.
+    func hasUnacknowledgedAlerts(_ instance: JamfInstance) -> Bool {
+        status(for: instance.id).notifications.contains { !isAcknowledged($0, instance: instance) }
+    }
+
+    /// Unacknowledged notifications per instance, skipping instances that are snoozed.
+    private func pendingInstanceAlerts() -> (groups: [InstanceAlertGroup], signatures: Set<String>) {
+        let now = Date()
+        var groups: [InstanceAlertGroup] = []
+        var signatures: Set<String> = []
+        for instance in instances {
+            if let snoozedUntil = instanceAlertSnoozedUntil[instance.id], now < snoozedUntil { continue }
+            let pending = status(for: instance.id).notifications.filter {
+                !acknowledgedAlerts.contains(alertSignature($0, instance: instance))
+            }
+            guard !pending.isEmpty else { continue }
+            let groupSignatures = Set(pending.map { alertSignature($0, instance: instance) })
+            groups.append(InstanceAlertGroup(id: instance.id,
+                                             instanceName: instance.displayName,
+                                             items: pending.map { InstanceAlertItem(title: $0.displayTitle, acknowledged: false) },
+                                             signatures: groupSignatures))
+            signatures.formUnion(groupSignatures)
+        }
+        return (groups, signatures)
+    }
+
+    /// Shows the popup when there are unacknowledged, unsnoozed notifications and either
+    /// 15 minutes have passed since it was last shown or a new notification has appeared.
+    private func checkInstanceAlerts() {
+        let pending = pendingInstanceAlerts()
+        guard !pending.groups.isEmpty else {
+            // Leave a popup the user opened from the menu alone
+            if instanceAlertManualIds == nil {
+                instanceAlertPanel?.orderOut(nil)
+            }
+            if instances.allSatisfy({ status(for: $0.id).notifications.isEmpty }) {
+                instanceAlertLastShown = nil
+                instanceAlertShownSignatures = []
+            }
+            return
+        }
+
+        let hasNew = !pending.signatures.isSubset(of: instanceAlertShownSignatures)
+        let isDue  = instanceAlertLastShown.map { Date().timeIntervalSince($0) >= instanceAlertRepeatInterval } ?? true
+        guard hasNew || isDue else { return }
+
+        writeToLog.message(stringOfText: ["[Alert] Jamf Pro notifications:"] + pending.groups.flatMap { group in
+            group.items.map { "    \(group.instanceName): \($0.title)" }
+        })
+
+        presentInstanceAlert(groups: pending.groups, manualIds: nil)
+        instanceAlertLastShown = Date()
+        instanceAlertShownSignatures.formUnion(pending.signatures)
+    }
+
+    /// Opens the popup from the menu for one instance (or all instances with notifications when nil).
+    /// Unlike the automatic popup it ignores snoozes and also lists acknowledged notifications.
+    func showInstanceAlert(for instanceId: UUID? = nil) {
+        let ids = instanceId.map { [$0] } ?? instances.map(\.id)
+        let groups = allInstanceAlertGroups(for: ids)
+        guard !groups.isEmpty else { return }
+        presentInstanceAlert(groups: groups, manualIds: ids)
+    }
+
+    private func presentInstanceAlert(groups: [InstanceAlertGroup], manualIds: [UUID]?) {
+        instanceAlertPanel?.orderOut(nil)
+        instanceAlertManualIds = manualIds
+        instanceAlertPanel = InstanceAlertPanel(
+            groups: groups,
+            actions: InstanceAlertPanel.Actions(
+                ignore:         { [weak self] id in self?.ignoreInstanceAlerts([id]) },
+                acknowledge:    { [weak self] id in self?.acknowledgeInstanceAlerts([id]) },
+                ignoreAll:      { [weak self] in self?.ignoreInstanceAlerts(nil) },
+                acknowledgeAll: { [weak self] in self?.acknowledgeInstanceAlerts(nil) }
+            )
+        )
+        instanceAlertPanel?.showOnActiveScreen()
+    }
+
+    /// Every notification for the given instances, with acknowledgement state.
+    private func allInstanceAlertGroups(for ids: [UUID]) -> [InstanceAlertGroup] {
+        instances.filter { ids.contains($0.id) }.compactMap { instance in
+            let notes = status(for: instance.id).notifications
+            guard !notes.isEmpty else { return nil }
+            let unacknowledged = notes.filter { !isAcknowledged($0, instance: instance) }
+            return InstanceAlertGroup(
+                id: instance.id,
+                instanceName: instance.displayName,
+                items: notes.map { InstanceAlertItem(title: $0.displayTitle, acknowledged: isAcknowledged($0, instance: instance)) },
+                signatures: Set(unacknowledged.map { alertSignature($0, instance: instance) })
+            )
+        }
+    }
+
+    /// Snoozes the popup for the given instances (nil = all currently listed) for 1 hour.
+    private func ignoreInstanceAlerts(_ ids: [UUID]?) {
+        let displayed = instanceAlertManualIds.map { allInstanceAlertGroups(for: $0) } ?? pendingInstanceAlerts().groups
+        let targets = ids ?? displayed.filter(\.needsAttention).map(\.id)
+        let until = Date().addingTimeInterval(instanceAlertSnoozeInterval)
+        for id in targets {
+            instanceAlertSnoozedUntil[id] = until
+            let name = instances.first { $0.id == id }?.displayName ?? id.uuidString
+            writeToLog.message(stringOfText: ["[Alert] \(name) notifications ignored for 1 hour"])
+        }
+        refreshVisibleInstanceAlert()
+    }
+
+    /// Acknowledges the listed notifications for the given instances (nil = all currently listed).
+    private func acknowledgeInstanceAlerts(_ ids: [UUID]?) {
+        let displayed = instanceAlertManualIds.map { allInstanceAlertGroups(for: $0) } ?? pendingInstanceAlerts().groups
+        for group in displayed where (ids?.contains(group.id) ?? true) && !group.signatures.isEmpty {
+            acknowledgedAlerts.formUnion(group.signatures)
+            writeToLog.message(stringOfText: ["[Alert] \(group.instanceName) notifications acknowledged"])
+        }
+        saveAcknowledgedAlerts()
+        refreshVisibleInstanceAlert()
+    }
+
+    /// Removes handled servers from the open popup, closing it when none remain.
+    /// A popup opened from the menu stays open and shows handled notifications as acknowledged.
+    private func refreshVisibleInstanceAlert() {
+        if let manualIds = instanceAlertManualIds {
+            let groups = allInstanceAlertGroups(for: manualIds)
+            if groups.isEmpty {
+                instanceAlertPanel?.orderOut(nil)
+            } else {
+                instanceAlertPanel?.update(groups: groups)
+            }
+            return
+        }
+        let pending = pendingInstanceAlerts()
+        if pending.groups.isEmpty {
+            instanceAlertPanel?.orderOut(nil)
+        } else {
+            instanceAlertPanel?.update(groups: pending.groups)
+        }
+    }
+
+    /// Menu bar icon reflects the worse of the Jamf Cloud status and unacknowledged instance notifications.
+    private func updateMenuBarIcon() {
+        let hasInstanceAlerts = instances.contains { hasUnacknowledgedAlerts($0) }
+        let result = hasInstanceAlerts ? "cloudStatus-red" : cloudIconState
         let style = UserDefaults.standard.string(forKey: "menuIconStyle") ?? "color"
         if style == "color" || result == "cloudStatus-green" {
             menuBarIconName = result
@@ -389,6 +598,7 @@ final class MonitorViewModel: ObservableObject {
         credentials[id] = nil
         deleteCredentialsIfUnused(removed)
         Task { await TokenManager.shared.invalidate(id) }
+        updateMenuBarIcon()
         writeToLog.message(stringOfText: ["[Settings] Removed instance \(removed.url)"])
     }
 

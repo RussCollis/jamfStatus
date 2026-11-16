@@ -1,6 +1,6 @@
 ## Change log
 
-2026-11-16: v3.1.0 - Add support for monitoring multiple Jamf Pro instances. Instances are added, edited, and removed from Settings → Server, each with its own name, URL, authentication type, and credentials. The menu shows a status light for each instance (click to open the instance in a browser), notifications are grouped by instance, and the Health Status window includes an instance picker. Existing single-server settings are migrated automatically.
+2026-11-16: v3.1.0 - Add support for monitoring multiple Jamf Pro instances. Instances are added, edited, and removed from Settings → Server, each with its own name, URL, authentication type, and credentials. The menu shows a status light for each instance (click to open the instance in a browser), each instance's notifications are listed directly under it, and the Health Status window includes an instance picker. When an instance has notifications its status light and the menu bar icon turn red, and a popup lists them every 15 minutes until acknowledged or ignored for 1 hour. Existing single-server settings are migrated automatically.
 
 2026-06-26: v3.0.0 - Significant code update. Resolve crash that could occur when trying to edit app settings.
 

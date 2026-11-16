@@ -53,7 +53,9 @@ There are two different menu bar icon styles to choose from.  One uses colors to
 
 Each configured instance is listed in the menu with a status light (🟢 connected, 🔴 unable to connect). Click an instance to open it in your browser.
 
-Notifications, if any, will appear after the next polling cycle once the information has been entered. When more than one instance is configured, notifications are grouped by instance.
+Notifications, if any, will appear after the next polling cycle once the information has been entered. Notifications are listed directly under the instance they belong to, and the instance's light and the menu bar icon turn red while it has notifications.
+
+A popup listing outstanding notifications is displayed every 15 minutes. Click Ignore for 1 Hour to snooze it, or Acknowledge to stop the popup for those notifications. A new notification will display the popup again. Acknowledged notifications remain listed in the menu, marked green, and no longer turn the instance or menu bar icon red. Click any notification in the menu, or choose Notifications…, to open the popup and review or acknowledge them.
 
 <img src="./jamfStatus/images/notifications.png" alt="Preferences" width="600" />
 

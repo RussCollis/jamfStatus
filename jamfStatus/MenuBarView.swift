@@ -57,48 +57,44 @@ struct MenuBarView: View {
             openWindow(id: "health-status")
         }
 
+        if monitor.instances.contains(where: { !monitor.status(for: $0.id).notifications.isEmpty }) {
+            Button("Notifications…") {
+                NSApp.activate(ignoringOtherApps: true)
+                monitor.showInstanceAlert()
+            }
+        }
+
         // Connection status light for each Jamf Pro instance; selecting one opens it in the browser.
         // Emoji are used because menu bar menus don't reliably render custom image icons.
+        // The instance's notifications, if any, are listed directly beneath it.
         ForEach(monitor.instances) { instance in
-            let connected = monitor.status(for: instance.id).connection == .connected
-            Button("\(connected ? "🟢" : "🔴") \(instance.displayName)") {
+            let status = monitor.status(for: instance.id)
+            // Red when the instance can't be reached or has unacknowledged notifications
+            let healthy = status.connection == .connected && !monitor.hasUnacknowledgedAlerts(instance)
+            Button("\(healthy ? "🟢" : "🔴") \(instance.displayName)") {
                 if let url = URL(string: instance.url) {
                     NSWorkspace.shared.open(url)
                 }
             }
             .help(instance.url)
-        }
 
-        if monitor.totalNotificationCount > 0 {
-            Menu("Notifications (\(monitor.totalNotificationCount))") {
-                if monitor.instances.count == 1, let instance = monitor.instances.first {
-                    notificationItems(for: instance)
-                } else {
-                    // Group notifications by instance when monitoring more than one server
-                    ForEach(monitor.instances) { instance in
-                        let count = monitor.status(for: instance.id).notifications.count
-                        if count > 0 {
-                            Menu("\(instance.displayName) (\(count))") {
-                                notificationItems(for: instance)
-                            }
+            if !status.notifications.isEmpty {
+                Menu("      Notifications (\(status.notifications.count))") {
+                    // Acknowledged notifications stay listed, marked green
+                    ForEach(status.notifications) { note in
+                        Button("\(monitor.isAcknowledged(note, instance: instance) ? "🟢" : "🔴") \(note.displayTitle)") {
+                            NSApp.activate(ignoringOtherApps: true)
+                            monitor.showInstanceAlert(for: instance.id)
                         }
                     }
                 }
             }
         }
 
-
         Divider()
 
         Button("Quit") {
             NSApplication.shared.terminate(nil)
-        }
-    }
-
-    @ViewBuilder
-    private func notificationItems(for instance: JamfInstance) -> some View {
-        ForEach(monitor.status(for: instance.id).notifications) { note in
-            Text(note.displayTitle)
         }
     }
 
