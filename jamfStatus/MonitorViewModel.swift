@@ -179,10 +179,6 @@ final class MonitorViewModel: ObservableObject {
     private func setStatus(_ status: InstanceStatus, for instanceId: UUID) {
         // Ignore results for an instance that was removed while it was being polled
         guard let instance = instances.first(where: { $0.id == instanceId }) else { return }
-        var status = status
-        #if DEBUG
-        status.notifications += demoNotifications(for: instance)
-        #endif
         statuses[instanceId] = status
 
         // Forget acknowledgements for notifications that have cleared, so they alert again if
@@ -198,19 +194,6 @@ final class MonitorViewModel: ObservableObject {
         }
         updateMenuBarIcon()
     }
-
-    #if DEBUG
-    /// Debug builds only: adds a sample error notification to any instance whose name contains
-    /// "dev" so the per-instance notifications menu can be demonstrated. Uses the same raw
-    /// format as /api/v1/notifications so it goes through the normal parsing.
-    private func demoNotifications(for instance: JamfInstance) -> [ParsedNotification] {
-        guard instance.displayName.localizedCaseInsensitiveContains("dev") else { return [] }
-        let raw: [[String: Any]] = [
-            ["type": "APNS_CONNECTION_FAILURE", "params": [:]]
-        ]
-        return raw.compactMap { ParsedNotification(raw: $0) }
-    }
-    #endif
 
     // MARK: - Notifications
 

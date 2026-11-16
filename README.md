@@ -98,7 +98,14 @@ Thu Sep 17 20:27:30 Jamf Cloud: All systems go.
 The Help menu links to this page and to GitHub issues, and shows the app version. jamfStatus updated by Russell Collis.
 
 ## Login Item
-Ensure notifications are not missed. Add the application to Settings --> General --> Login Items & Extensions
+Ensure notifications are not missed. The installer package adds a LaunchAgent (/Library/LaunchAgents/com.jamf.cloudmonitor.plist) so jamfStatus starts automatically at login for all users. If you installed the app by copying it, add it to Settings --> General --> Login Items & Extensions instead.
+
+To stop jamfStatus launching at login, remove the LaunchAgent:
+
+```
+sudo launchctl bootout gui/$(id -u)/com.jamf.cloudmonitor
+sudo rm /Library/LaunchAgents/com.jamf.cloudmonitor.plist
+```
 <img src="./jamfStatus/images/loginItem.png" alt="Login Items" width="660" /><br>
 
 
