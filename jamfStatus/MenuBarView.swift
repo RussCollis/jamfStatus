@@ -93,6 +93,24 @@ struct MenuBarView: View {
 
         Divider()
 
+        Menu("Help") {
+            Button("jamfStatus Help") {
+                if let url = URL(string: "https://github.com/jamf/jamfStatus#readme") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Button("Report an Issue") {
+                if let url = URL(string: "https://github.com/jamf/jamfStatus/issues") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Divider()
+            Text("jamfStatus \(AppInfo.version) (\(AppInfo.build))")
+            Text("Updated by Russell Collis")
+        }
+
+        Divider()
+
         Button("Quit") {
             NSApplication.shared.terminate(nil)
         }

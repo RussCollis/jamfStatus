@@ -17,6 +17,10 @@ struct AboutView: View {
             Text("Version \(AppInfo.version) (\(AppInfo.build))")
                 .foregroundStyle(.secondary)
 
+            Text("Updated by Russell Collis")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
             ScrollView {
                 Text(attributedBody())
                     .frame(maxWidth: .infinity, alignment: .leading)

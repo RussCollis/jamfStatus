@@ -55,7 +55,19 @@ Each configured instance is listed in the menu with a status light (🟢 connect
 
 Notifications, if any, will appear after the next polling cycle once the information has been entered. Notifications are listed directly under the instance they belong to, and the instance's light and the menu bar icon turn red while it has notifications.
 
-A popup listing outstanding notifications is displayed every 15 minutes. Click Ignore for 1 Hour to snooze it, or Acknowledge to stop the popup for those notifications. A new notification will display the popup again. Acknowledged notifications remain listed in the menu, marked green, and no longer turn the instance or menu bar icon red. Click any notification in the menu, or choose Notifications…, to open the popup and review or acknowledge them.
+### Notification alerts
+
+A popup listing outstanding notifications, grouped by server, is displayed every 15 minutes. Each server can be handled independently:
+
+- **Acknowledge** stops the popup for that server's current notifications. A new notification will display the popup again.
+- **Ignore 1 Hour** snoozes that server for an hour while other servers continue to alert.
+- **Acknowledge All** / **Ignore All for 1 Hour** handle every listed server at once.
+
+<img src="./jamfStatus/images/instanceAlert.png" alt="Notification alert" width="500" />
+
+Acknowledged notifications remain listed in the menu, marked green, and no longer turn the instance or menu bar icon red. Click any notification in the menu, or choose Notifications…, to open the popup and review or acknowledge them.
+
+<img src="./jamfStatus/images/instanceAlertAcknowledged.png" alt="Acknowledged notifications" width="500" />
 
 <img src="./jamfStatus/images/notifications.png" alt="Preferences" width="600" />
 
@@ -81,6 +93,9 @@ Thu Sep 17 20:27:30 Notice
 Thu Sep 17 20:27:30 Jamf Cloud: All systems go.
 ```
 <br>
+
+## Help
+The Help menu links to this page and to GitHub issues, and shows the app version. jamfStatus updated by Russell Collis.
 
 ## Login Item
 Ensure notifications are not missed. Add the application to Settings --> General --> Login Items & Extensions
