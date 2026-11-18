@@ -1,5 +1,7 @@
 ## Change log
 
+2026-11-18: v3.2.2 - Distribution build: the app is signed with a Developer ID certificate and shipped in a signed, notarized and stapled distribution package. Bundle identifier changed to com.russcollis.jamfStatus.
+
 2026-11-16: v3.2.1 - Prepare for general use: remove the development-only demo notification. The installer package now also installs a LaunchAgent (/Library/LaunchAgents/com.jamf.cloudmonitor.plist) so jamfStatus starts at login for all users, and restarts the app after an upgrade.
 
 2026-11-16: v3.2.0 - Add Jamf Pro notification alerts. When an instance has unacknowledged notifications its status light and the menu bar icon turn red, and a popup lists them by server every 15 minutes. Each server can be acknowledged or ignored for 1 hour independently (or all at once). Acknowledged notifications remain listed in the menu, marked green. Click a notification, or choose Notifications…, to open the popup from the menu. Add a Help menu. Updated by Russell Collis.

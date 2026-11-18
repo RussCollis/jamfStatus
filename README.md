@@ -4,6 +4,27 @@
  
 Download: [jamfStatus](https://github.com/jamf/jamfStatus/releases/latest/download/jamfStatus.zip)
 
+**Version:** 3.2.2
+**Owner:** Russell Collis
+
+## Installation
+Install with the signed and notarized package `jamfStatus-<version>.pkg`. Double-click it, or deploy it with Jamf Pro or another MDM. The package:
+
+- Installs jamfStatus.app into /Applications.
+- Installs an all-users LaunchAgent (/Library/LaunchAgents/com.jamf.cloudmonitor.plist) so jamfStatus starts at login.
+- Quits any running copy before upgrading and starts the new version once installed.
+
+The package is signed with a Developer ID Installer certificate and notarized by Apple, so Gatekeeper allows it on any Mac running macOS 13 or later. The app's bundle identifier is `com.russcollis.jamfStatus` and the package identifier is `com.russcollis.jamfStatus.pkg`.
+
+### Building the package
+On a Mac with the Developer ID Application and Developer ID Installer certificates (team UM5LY5579J) and a `notary` notarytool keychain profile:
+
+```
+./localOnly/build-distribution-pkg.sh
+```
+
+The script builds the Release app, signs it with the hardened runtime, builds a signed distribution package, notarizes and staples it, and checks it with `spctl`. The output is `localOnly/jamfStatus-<version>.pkg`.
+
 The application submits basic hardware, OS, and jamfStatus application usage to [TelemetryDeck](https://telemetrydeck.com) by default. The data is sent anonymously and can be disabled by clicking 'Opt out of analytics' from the 'About...' window.
 
 Keep an eye on the status of Jamf Cloud with jamfStatus.  The app will place an icon in the menu bar to reflect the current cloud status, and can monitor notifications and health status for multiple Jamf Pro instances.
